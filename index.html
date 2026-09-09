@@ -94,6 +94,9 @@ h1,h2,h3, .game-title, .panel-title{ font-family:'Fredoka One', cursive; }
 .tile .special-icon{ position:absolute; inset:0; display:flex; align-items:center; justify-content:center; font-size:1.1em; text-shadow:0 0 4px #000, 0 0 4px #000; }
 .tile.hint{ animation:hintPulse .8s ease infinite; }
 @keyframes hintPulse{ 0%,100%{box-shadow:0 0 4px var(--amber);} 50%{box-shadow:0 0 18px var(--amber);} }
+.tile.sliding{ transition: transform .17s ease; }
+.tile.matched-blink{ animation: blinkMatch .26s ease-in-out 1; z-index:4; }
+@keyframes blinkMatch{ 0%,100%{ filter:brightness(1) saturate(1); transform:scale(1); } 50%{ filter:brightness(1.9) saturate(1.5); transform:scale(1.12); } }
 
 .game-actions{ display:flex; gap:10px; justify-content:center; }
 .toast{ position:fixed; bottom:18px; left:50%; transform:translate(-50%, 20px); background:rgba(10,45,71,.95); border:1px solid var(--amber); padding:9px 16px; border-radius:14px; font-weight:800; opacity:0; pointer-events:none; transition:all .25s ease; max-width:90%; text-align:center; z-index:50;}
@@ -638,6 +641,7 @@ function resolveAll(grid, tileKeys, swapPos, weightFn){
   const clearedCounts = {};
   let scoreGained = 0;
   const comboKindsTriggered = [];
+  const steps = []; // per-cascade-wave record, used to play the chain reaction back visually one wave at a time
   let currentSwapPos = swapPos;
   while(true){
     if(cascadeCount>=MAX_CASCADES) break;
@@ -648,12 +652,32 @@ function resolveAll(grid, tileKeys, swapPos, weightFn){
     currentSwapPos = null;
     const {toClear, triggeredKinds} = expandWithSpecials(grid, matchedSet);
     triggeredKinds.forEach(t=>comboKindsTriggered.push(t));
-    toClear.forEach(({r,c})=>{
-      const cell = grid[r][c];
-      if(cell){ clearedCounts[cell.type]=(clearedCounts[cell.type]||0)+1; scoreGained += 10*cascadeCount; }
-    });
+
     const specialPositions = new Map();
     specialsToCreate.forEach(sp=>specialPositions.set(cellKey(sp.r,sp.c), sp));
+
+    const stepClearedCounts = {};
+    let stepScoreGained = 0;
+    const clearedCellsForStep = [];   // cells that will actually disappear this wave
+    const specialsCreatedForStep = []; // cells that become a special tile instead of disappearing
+
+    toClear.forEach(({r,c})=>{
+      const cell = grid[r][c];
+      if(cell){
+        clearedCounts[cell.type]=(clearedCounts[cell.type]||0)+1;
+        stepClearedCounts[cell.type]=(stepClearedCounts[cell.type]||0)+1;
+        scoreGained += 10*cascadeCount;
+        stepScoreGained += 10*cascadeCount;
+      }
+      const key = cellKey(r,c);
+      if(specialPositions.has(key)){
+        const sp = specialPositions.get(key);
+        specialsCreatedForStep.push({r,c,kind:sp.kind});
+      } else {
+        clearedCellsForStep.push({r,c});
+      }
+    });
+
     toClear.forEach(({r,c})=>{
       const key = cellKey(r,c);
       if(specialPositions.has(key)){
@@ -664,8 +688,18 @@ function resolveAll(grid, tileKeys, swapPos, weightFn){
       }
     });
     applyGravity(grid, tileKeys, weightFn);
+
+    steps.push({
+      cascadeLevel: cascadeCount,
+      clearedCells: clearedCellsForStep,
+      specialsCreated: specialsCreatedForStep,
+      triggeredKinds,
+      stepClearedCounts,
+      stepScoreGained,
+      gridAfter: grid.map(row=>row.map(cell=> cell ? {...cell} : null)),
+    });
   }
-  return { clearedCounts, scoreGained, cascadeCount, comboKindsTriggered };
+  return { clearedCounts, scoreGained, cascadeCount, comboKindsTriggered, steps };
 }
 
 function swapCells(grid, a, b){ const tmp=grid[a.r][a.c]; grid[a.r][a.c]=grid[b.r][b.c]; grid[b.r][b.c]=tmp; }
@@ -961,6 +995,7 @@ function renderBoard(){
   const containerWidth = (appEl ? appEl.clientWidth : window.innerWidth) - 24; // account for #app's own side padding
   const boardMaxPx = Math.min(640, containerWidth, window.innerWidth - 32);
   const tileSize = Math.floor((boardMaxPx - (lv.grid-1)*4 - 16) / lv.grid);
+  game.tileSize = tileSize; // remembered so swap/slide animations know the pixel step size
   board.innerHTML = '';
   for(let r=0;r<lv.grid;r++){
     for(let c=0;c<lv.grid;c++){
@@ -1024,21 +1059,41 @@ function clearSelection(){
 
 function attemptSwap(a,b){
   const lv = game.level;
+  const ea = tileEl(a.r,a.c), eb = tileEl(b.r,b.c);
+  const step = (game.tileSize||60) + 4; // tileSize + board gap, in px
+  const dx = (b.c-a.c) * step;
+  const dy = (b.r-a.r) * step;
+
   if(!wouldMatch(game.grid, a, b)){
-    // invalid: shake both then revert visually
-    const ea = tileEl(a.r,a.c), eb = tileEl(b.r,b.c);
-    if(ea) ea.classList.add('shake');
-    if(eb) eb.classList.add('shake');
+    // invalid: peek toward each other (shows an attempted swap), then bounce back with a shake
+    boardLocked = true;
     sfx.invalid();
-    setTimeout(()=>{ if(ea)ea.classList.remove('shake'); if(eb)eb.classList.remove('shake'); }, 320);
+    if(ea){ ea.classList.add('sliding'); ea.style.transform = `translate(${dx*0.32}px, ${dy*0.32}px)`; }
+    if(eb){ eb.classList.add('sliding'); eb.style.transform = `translate(${-dx*0.32}px, ${-dy*0.32}px)`; }
+    setTimeout(()=>{
+      if(ea){ ea.style.transform=''; ea.classList.add('shake'); }
+      if(eb){ eb.style.transform=''; eb.classList.add('shake'); }
+      setTimeout(()=>{
+        if(ea){ ea.classList.remove('shake','sliding'); }
+        if(eb){ eb.classList.remove('shake','sliding'); }
+        boardLocked = false;
+      }, 300);
+    }, 150);
     return;
   }
+
+  // valid: slide fully into each other's spot first, then commit the swap to the model
   boardLocked = true;
-  swapCells(game.grid, a, b);
-  game.movesLeft--;
-  renderHUD();
-  renderBoard();
-  setTimeout(()=> processResolve(b), 180);
+  if(ea){ ea.classList.add('sliding'); ea.style.transform = `translate(${dx}px, ${dy}px)`; ea.style.zIndex = 3; }
+  if(eb){ eb.classList.add('sliding'); eb.style.transform = `translate(${-dx}px, ${-dy}px)`; eb.style.zIndex = 3; }
+
+  setTimeout(()=>{
+    swapCells(game.grid, a, b);
+    game.movesLeft--;
+    renderHUD();
+    renderBoard(); // shows the swapped-but-not-yet-resolved board; the step player takes it from here
+    setTimeout(()=> processResolve(b), 40);
+  }, 180);
 }
 
 function processResolve(swapPos){
@@ -1058,17 +1113,66 @@ function processResolve(swapPos){
     };
   }
   const result = resolveAll(game.grid, lv.tiles, swapPos, weightFn);
-  game.score += result.scoreGained;
-  if(result.cascadeCount>0) sfx.match(result.cascadeCount);
+  playCascadeStep(result, 0);
+}
 
-  // update goal progress
-  Object.keys(result.clearedCounts).forEach(type=>{
-    if(lv.goal.type==='single' && type===lv.goal.key){
-      game.goalProgress[type] = (game.goalProgress[type]||0) + result.clearedCounts[type];
-    } else if(lv.goal.type==='multi' && (lv.goal.keys || lv.tiles).includes(type)){
-      game.goalProgress[type] = (game.goalProgress[type]||0) + result.clearedCounts[type];
+/* Plays back one "wave" of a cascade at a time: blink the tiles that matched, clear them,
+   drop the board into its post-gravity state, then move on to the next wave (if the clear
+   triggered further matches). This is what lets the player actually see a chain reaction
+   happen instead of the board just jumping straight to its final settled state. */
+function playCascadeStep(result, idx){
+  const lv = game.level;
+  if(idx >= result.steps.length){
+    finishResolve(result);
+    return;
+  }
+  const step = result.steps[idx];
+  const allMatched = step.clearedCells.concat(step.specialsCreated);
+
+  sfx.match(step.cascadeLevel);
+  step.triggeredKinds.forEach(t=>{
+    if(t.kind==='line'){
+      sfx.lineClear();
+      if(lv.tiles.includes('chat')) showToast('👓 Chat sees everything!');
+    } else if(t.kind==='blast'){
+      sfx.blastClear();
+      if(lv.tiles.includes('camera') || lv.tiles.includes('corvy')) showToast('📸 Smile for the camera!');
     }
   });
+
+  allMatched.forEach(({r,c})=>{
+    const el = tileEl(r,c);
+    if(el) el.classList.add('matched-blink');
+  });
+
+  setTimeout(()=>{
+    // Apply this wave's score/progress now, in sync with the clear so numbers visibly tick up per wave.
+    game.score += step.stepScoreGained;
+    Object.keys(step.stepClearedCounts).forEach(type=>{
+      if(lv.goal.type==='single' && type===lv.goal.key){
+        game.goalProgress[type] = (game.goalProgress[type]||0) + step.stepClearedCounts[type];
+      } else if(lv.goal.type==='multi' && (lv.goal.keys || lv.tiles).includes(type)){
+        game.goalProgress[type] = (game.goalProgress[type]||0) + step.stepClearedCounts[type];
+      }
+    });
+    renderHUD();
+    renderGoalBar();
+
+    step.clearedCells.forEach(({r,c})=>{
+      const el = tileEl(r,c);
+      if(el) el.classList.add('clearing');
+    });
+
+    setTimeout(()=>{
+      game.grid = step.gridAfter.map(row=>row.map(cell=> cell ? {...cell} : null));
+      renderBoard();
+      setTimeout(()=> playCascadeStep(result, idx+1), 80);
+    }, 220);
+  }, 260);
+}
+
+function finishResolve(result){
+  const lv = game.level;
 
   // Cookie's Camo: big cascade chain bonus if Cookie is in this level's tile set
   if(lv.tiles.includes('cookie') && result.cascadeCount>=3){
@@ -1084,21 +1188,9 @@ function processResolve(swapPos){
       if(removed>0){
         showToast('🎭 Now you see her, now you don\'t!');
         sfx.camo();
-        if(lv.goal.type==='single' && pick===lv.goal.key){ /* no credit for camo removal, only real matches count */ }
       }
     }
   }
-
-  // flavor toasts for power-ups actually triggered
-  result.comboKindsTriggered.forEach(t=>{
-    if(t.kind==='line'){
-      sfx.lineClear();
-      if(lv.tiles.includes('chat')) showToast("👓 Chat sees everything!");
-    } else if(t.kind==='blast'){
-      sfx.blastClear();
-      if(lv.tiles.includes('camera') || lv.tiles.includes('corvy')) showToast('📸 Smile for the camera!');
-    }
-  });
 
   renderHUD();
   renderGoalBar();
