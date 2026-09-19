@@ -54,7 +54,8 @@ h1,h2,h3, .game-title, .panel-title{ font-family:'Fredoka One', cursive; }
 .case-card.locked{ opacity:.55; cursor:default; }
 .case-card .cnum{ font-size:.7rem; color:var(--sky); font-weight:800; }
 .case-card .cname{ font-size:.72rem; font-weight:800; margin:3px 0; min-height:28px; line-height:1.05; }
-.case-card .cstars{ font-size:.75rem; color:var(--amber); }
+.case-card .cstars{ font-size:.82rem; letter-spacing:1px; }
+.case-card .cbest{ font-size:.62rem; color:var(--sky); font-weight:700; margin-top:2px; }
 .case-card.unlocked{ border-color: rgba(240,165,0,.55); box-shadow:0 0 10px rgba(240,165,0,.25); }
 
 .dossier-grid{ display:grid; grid-template-columns:repeat(4,1fr); gap:8px; }
@@ -83,8 +84,11 @@ h1,h2,h3, .game-title, .panel-title{ font-family:'Fredoka One', cursive; }
 
 .board-wrap{ display:flex; justify-content:center; margin-bottom:10px;}
 #board{ display:grid; gap:4px; background:var(--board-bg); padding:8px; border-radius:16px; border:1px solid rgba(168,216,234,.2); box-shadow: inset 0 0 30px rgba(0,0,0,.35);}
-.tile{ position:relative; border-radius:50%; background-size:cover; background-position:center; cursor:pointer; box-shadow:0 2px 5px rgba(0,0,0,.4); animation:dropIn .32s ease; }
-@keyframes dropIn{ from{opacity:0; transform:translateY(-16px) scale(.7);} to{opacity:1; transform:translateY(0) scale(1);} }
+.tile{ position:relative; border-radius:50%; background-size:cover; background-position:center; cursor:pointer; box-shadow:0 2px 5px rgba(0,0,0,.4); animation:dropIn .32s ease; transition:transform .1s ease, box-shadow .1s ease; }
+.tile:not(.selected):not(.shake):not(.matched-blink):hover{ transform:scale(1.12); box-shadow:0 0 10px rgba(255,255,255,.45), 0 4px 10px rgba(0,0,0,.5); z-index:2; }
+.tile:not(.selected):not(.shake):active{ transform:scale(1.05); }
+/* dropIn kept as fallback for first-load board render (no newCells passed) */
+@keyframes dropIn{ from{opacity:0; transform:translateY(-14px) scale(.8);} to{opacity:1; transform:translateY(0) scale(1);} }
 .tile.selected{ outline:3px solid var(--amber); outline-offset:2px; box-shadow:0 0 12px var(--amber); }
 .tile.clearing{ animation:clearPop .22s ease forwards; }
 @keyframes clearPop{ to{ transform:scale(0); opacity:0; } }
@@ -97,6 +101,46 @@ h1,h2,h3, .game-title, .panel-title{ font-family:'Fredoka One', cursive; }
 .tile.sliding{ transition: transform .17s ease; }
 .tile.matched-blink{ animation: blinkMatch .26s ease-in-out 1; z-index:4; }
 @keyframes blinkMatch{ 0%,100%{ filter:brightness(1) saturate(1); transform:scale(1); } 50%{ filter:brightness(1.9) saturate(1.5); transform:scale(1.12); } }
+.particle{ position:fixed; pointer-events:none; z-index:200; top:0; left:0; will-change:transform,opacity; border-radius:2px; }
+@keyframes confettiFall{
+  0%{
+    transform: translate(0px, 0px) rotate(var(--r0)) scaleX(var(--sx));
+    opacity: 1;
+  }
+  60%{ opacity: 1; }
+  100%{
+    transform: translate(var(--px), var(--py)) rotate(var(--r1)) scaleX(var(--sx));
+    opacity: 0;
+  }
+}
+
+/* ---- Score popups ---- */
+.score-popup{ position:fixed; pointer-events:none; z-index:210; font-family:'Fredoka One',cursive;
+  font-size:1.15rem; font-weight:900; color:#fff; text-shadow:0 0 6px rgba(0,0,0,.7), 0 2px 0 rgba(0,0,0,.5);
+  white-space:nowrap; will-change:transform,opacity; }
+@keyframes scoreFloat{
+  0%  { transform:translateY(0)   scale(1.2); opacity:1; }
+  30% { transform:translateY(-14px) scale(1);   opacity:1; }
+  100%{ transform:translateY(-46px) scale(0.85); opacity:0; }
+}
+
+/* ---- Cascade label ---- */
+.chain-badge{ position:fixed; pointer-events:none; z-index:215; font-family:'Fredoka One',cursive;
+  font-size:1.45rem; color:#ffe033; text-shadow:0 0 10px #f0a500, 0 0 22px #f0a500, 0 2px 0 rgba(0,0,0,.6);
+  white-space:nowrap; will-change:transform,opacity; }
+@keyframes chainPop{
+  0%  { transform:translate(-50%,-50%) scale(0.4); opacity:0; }
+  20% { transform:translate(-50%,-50%) scale(1.25); opacity:1; }
+  60% { transform:translate(-50%,-50%) scale(1);    opacity:1; }
+  100%{ transform:translate(-50%,-50%) scale(0.9);  opacity:0; }
+}
+
+/* ---- Goal-bar pulse ---- */
+@keyframes goalPulse{
+  0%,100%{ transform:scale(1);    box-shadow:none; }
+  40%    { transform:scale(1.18); box-shadow:0 0 12px var(--amber); }
+}
+.goal-item.just-collected{ animation:goalPulse .4s ease; }
 
 .game-actions{ display:flex; gap:10px; justify-content:center; }
 .toast{ position:fixed; bottom:18px; left:50%; transform:translate(-50%, 20px); background:rgba(10,45,71,.95); border:1px solid var(--amber); padding:9px 16px; border-radius:14px; font-weight:800; opacity:0; pointer-events:none; transition:all .25s ease; max-width:90%; text-align:center; z-index:50;}
@@ -689,10 +733,29 @@ function resolveAll(grid, tileKeys, swapPos, weightFn){
     });
     applyGravity(grid, tileKeys, weightFn);
 
+    // Identify which cells are newly refilled (they were null before gravity ran).
+    // These get a staggered drop-in animation in renderBoard so the player can see
+    // tiles fall into place column by column rather than just appearing instantly.
+    const newCells = [];
+    toClear.forEach(({r})=>{
+      // For each row that was cleared, the top `n` rows of that column are new,
+      // where n is the number of cells cleared in that column.
+    });
+    // Simpler and more accurate: compare against the cleared positions.
+    // Column c had clearedInCol[c] cells removed; the top clearedInCol[c] rows
+    // of that column in gridAfter are the fresh refills.
+    const clearedInCol = {};
+    toClear.forEach(({c})=>{ clearedInCol[c] = (clearedInCol[c]||0)+1; });
+    Object.keys(clearedInCol).forEach(c=>{
+      const n = clearedInCol[c];
+      for(let r=0;r<n;r++) newCells.push({r, c:parseInt(c,10)});
+    });
+
     steps.push({
       cascadeLevel: cascadeCount,
       clearedCells: clearedCellsForStep,
       specialsCreated: specialsCreatedForStep,
+      newCells,
       triggeredKinds,
       stepClearedCounts,
       stepScoreGained,
@@ -842,12 +905,21 @@ function renderCaseGrid(){
   const el = $('#case-grid');
   el.innerHTML = LEVELS.map(lv=>{
     const unlocked = lv.num <= state.unlockedLevel;
-    const stars = starsForLevel(lv.num);
-    const starStr = stars>0 ? '⭐'.repeat(stars) : '';
+    const st = state.levelStats[lv.num];
+    const stars = st ? st.stars : 0;
+    const bestScore = st ? st.bestScore : 0;
     if(!unlocked){
       return `<div class="case-card locked"><div class="cnum">Case ${lv.num}</div><div class="cname">🔒 Unsolved</div></div>`;
     }
-    return `<div class="case-card unlocked" data-level="${lv.num}"><div class="cnum">Case ${lv.num}</div><div class="cname">${lv.name}</div><div class="cstars">${starStr||'&nbsp;'}</div></div>`;
+    // filled + empty pips, always 3 total so layout is stable
+    const starPips = '⭐'.repeat(stars) + '☆'.repeat(3-stars);
+    const bestLine = stars > 0 ? `<div class="cbest">${bestScore.toLocaleString()} pts</div>` : `<div class="cbest">&nbsp;</div>`;
+    return `<div class="case-card unlocked" data-level="${lv.num}">
+      <div class="cnum">Case ${lv.num}</div>
+      <div class="cname">${lv.name}</div>
+      <div class="cstars">${starPips}</div>
+      ${bestLine}
+    </div>`;
   }).join('');
   $all('.case-card.unlocked').forEach(card=>{
     card.addEventListener('click', ()=> { sfx.button(); startLevel(parseInt(card.dataset.level,10)); } );
@@ -987,15 +1059,26 @@ function renderHUD(){
 }
 
 /* ================= BOARD RENDER ================= */
-function renderBoard(){
+function renderBoard(newCells){
   const lv = game.level;
   const board = $('#board');
   board.style.gridTemplateColumns = `repeat(${lv.grid}, 1fr)`;
   const appEl = document.getElementById('app');
-  const containerWidth = (appEl ? appEl.clientWidth : window.innerWidth) - 24; // account for #app's own side padding
+  const containerWidth = (appEl ? appEl.clientWidth : window.innerWidth) - 24;
   const boardMaxPx = Math.min(640, containerWidth, window.innerWidth - 32);
   const tileSize = Math.floor((boardMaxPx - (lv.grid-1)*4 - 16) / lv.grid);
-  game.tileSize = tileSize; // remembered so swap/slide animations know the pixel step size
+  game.tileSize = tileSize;
+
+  // Build a fast lookup of which cells are newly refilled this wave
+  const newSet = new Set();
+  if(newCells && newCells.length){
+    newCells.forEach(({r,c})=> newSet.add(r+'_'+c));
+  }
+
+  // How many new tiles are in each column (for per-column stagger delay)
+  const colNewCount = {};
+  if(newCells) newCells.forEach(({c})=>{ colNewCount[c]=(colNewCount[c]||0)+1; });
+
   board.innerHTML = '';
   for(let r=0;r<lv.grid;r++){
     for(let c=0;c<lv.grid;c++){
@@ -1006,6 +1089,34 @@ function renderBoard(){
       div.style.height = tileSize+'px';
       div.style.backgroundImage = `url(${tileImg(cell.type)})`;
       div.dataset.r = r; div.dataset.c = c;
+
+      if(newSet.has(r+'_'+c)){
+        // This tile just dropped in from above. Stagger by column (left→right)
+        // and within the column by row (top tiles land last since they fall furthest).
+        // Column stagger: 30ms per column offset.
+        // Row stagger within column: top row (r=0) is the last to land.
+        const colOffset = c * 28;
+        const rowOffset = Math.max(0, (colNewCount[c]||1) - 1 - r) * 18;
+        const delay = colOffset + rowOffset;
+        const fallDist = (r + 1) * (tileSize + 4); // pixels it falls from
+        div.style.animation = 'none'; // kill the default dropIn
+        div.style.opacity = '0';
+        div.style.transform = `translateY(-${fallDist}px) scale(0.8)`;
+        // Use a tiny timeout so the browser registers the starting state before we start the transition
+        const d = div;
+        const del = delay;
+        setTimeout(()=>{
+          d.style.transition = `transform 240ms cubic-bezier(0.22,1.1,0.36,1), opacity 180ms ease`;
+          d.style.transform = 'translateY(0) scale(1)';
+          d.style.opacity = '1';
+          // Clean up inline styles after animation so hover/other effects aren't blocked
+          setTimeout(()=>{ d.style.transition=''; d.style.transform=''; d.style.opacity=''; }, 260);
+        }, del + 16);
+      } else {
+        // Existing tile — no drop animation
+        div.style.animation = 'none';
+      }
+
       if(cell.special==='line'){
         const isChat = lv.tiles.includes('chat');
         div.innerHTML = `<span class="special-icon">${isChat?'👓':'🔎'}</span>`;
@@ -1120,6 +1231,121 @@ function processResolve(swapPos){
    drop the board into its post-gravity state, then move on to the next wave (if the clear
    triggered further matches). This is what lets the player actually see a chain reaction
    happen instead of the board just jumping straight to its final settled state. */
+const PARTICLE_COLORS = [
+  '#f0a500','#ffe033','#ff5caa','#5cd4ff','#7fff6e',
+  '#ffffff','#ff7c2a','#c97fff','#a8d8ea','#ff4444'
+];
+function spawnParticles(cx, cy, count){
+  count = count || (14 + Math.floor(Math.random()*8));
+  for(let i=0;i<count;i++){
+    const el = document.createElement('div');
+    el.className = 'particle';
+
+    // confetti piece dimensions — wide & flat like real confetti
+    const w = 10 + Math.random()*14;
+    const h = 5 + Math.random()*7;
+    el.style.width = w+'px';
+    el.style.height = h+'px';
+
+    const color = PARTICLE_COLORS[Math.floor(Math.random()*PARTICLE_COLORS.length)];
+    el.style.background = color;
+    el.style.boxShadow = `0 0 4px ${color}`;
+
+    // initial rotation
+    const r0 = Math.random()*360;
+    // tumble: spin 90–540 degrees during flight
+    const spin = (90 + Math.random()*450) * (Math.random()<.5?1:-1);
+    const r1 = r0 + spin;
+
+    // scaleX flicker gives the "flip" illusion (confetti catching light)
+    const sx = Math.random()<0.5 ? 1 : -1;
+
+    // trajectory: burst outward then arc downward (gravity feel)
+    const angle = (Math.random()*Math.PI*1.4) - Math.PI*0.7 - Math.PI/2; // mostly upward fan
+    const speed = 55 + Math.random()*85;
+    const px = Math.cos(angle)*speed;
+    const py = Math.sin(angle)*speed + (30 + Math.random()*60); // gravity pulls down
+
+    el.style.left = (cx - w/2)+'px';
+    el.style.top  = (cy - h/2)+'px';
+    el.style.setProperty('--px', px+'px');
+    el.style.setProperty('--py', py+'px');
+    el.style.setProperty('--r0', r0+'deg');
+    el.style.setProperty('--r1', r1+'deg');
+    el.style.setProperty('--sx',  sx);
+
+    const duration = 520 + Math.random()*320;
+    el.style.animation = `confettiFall ${duration}ms cubic-bezier(0.25,0.46,0.45,0.94) forwards`;
+    document.body.appendChild(el);
+    setTimeout(()=>{ if(el.parentNode) el.parentNode.removeChild(el); }, duration+60);
+  }
+}
+function spawnParticlesAtTile(r,c){
+  const el = tileEl(r,c);
+  if(!el) return;
+  const rect = el.getBoundingClientRect();
+  spawnParticles(rect.left + rect.width/2, rect.top + rect.height/2);
+}
+
+/* ---- Floating score popup ---- */
+function spawnScorePopup(cx, cy, points, cascadeLevel){
+  const el = document.createElement('div');
+  el.className = 'score-popup';
+  // colour shifts warmer/brighter on deeper cascades
+  const colors = ['#ffffff','#ffe033','#ffaa00','#ff7700','#ff3300','#ff00cc'];
+  el.style.color = colors[Math.min(cascadeLevel-1, colors.length-1)];
+  el.textContent = '+' + points;
+  el.style.left = cx + 'px';
+  el.style.top  = cy + 'px';
+  el.style.transform = 'translate(-50%,-50%)';
+  el.style.animation = 'scoreFloat 780ms cubic-bezier(0.22,1,0.36,1) forwards';
+  document.body.appendChild(el);
+  setTimeout(()=>{ if(el.parentNode) el.parentNode.removeChild(el); }, 840);
+}
+
+/* ---- Chain badge ---- */
+function spawnChainBadge(cascadeLevel){
+  if(cascadeLevel < 2) return; // only show for actual chains (cascade 2+)
+  // place it in the centre of the board
+  const board = document.getElementById('board');
+  if(!board) return;
+  const rect = board.getBoundingClientRect();
+  const cx = rect.left + rect.width/2;
+  const cy = rect.top  + rect.height/2;
+  const labels = ['','','⚡ CHAIN x2!','🔥 CHAIN x3!','💥 CHAIN x4!','🌟 CHAIN x5!'];
+  const label = labels[Math.min(cascadeLevel, labels.length-1)] || `⭐ CHAIN x${cascadeLevel}!`;
+  const el = document.createElement('div');
+  el.className = 'chain-badge';
+  el.textContent = label;
+  el.style.left = cx + 'px';
+  el.style.top  = cy + 'px';
+  el.style.animation = 'chainPop 700ms cubic-bezier(0.22,1,0.36,1) forwards';
+  document.body.appendChild(el);
+  setTimeout(()=>{ if(el.parentNode) el.parentNode.removeChild(el); }, 760);
+}
+
+/* ---- Goal-bar pulse ---- */
+function pulseGoalItems(collectedTypes){
+  const lv = game.level;
+  collectedTypes.forEach(type=>{
+    const isGoalType = (lv.goal.type==='single' && type===lv.goal.key) ||
+                       (lv.goal.type==='multi'  && (lv.goal.keys||lv.tiles).includes(type));
+    if(!isGoalType) return;
+    // find the matching .goal-item by checking its img src
+    const items = document.querySelectorAll('#goal-bar .goal-item');
+    items.forEach(item=>{
+      const img = item.querySelector('img');
+      if(img && img.src.includes(type)){
+        item.classList.remove('just-collected');
+        // force reflow so the animation re-triggers even if already playing
+        void item.offsetWidth;
+        item.classList.add('just-collected');
+        setTimeout(()=> item.classList.remove('just-collected'), 450);
+      }
+    });
+  });
+}
+
 function playCascadeStep(result, idx){
   const lv = game.level;
   if(idx >= result.steps.length){
@@ -1130,6 +1356,7 @@ function playCascadeStep(result, idx){
   const allMatched = step.clearedCells.concat(step.specialsCreated);
 
   sfx.match(step.cascadeLevel);
+  spawnChainBadge(step.cascadeLevel);
   step.triggeredKinds.forEach(t=>{
     if(t.kind==='line'){
       sfx.lineClear();
@@ -1158,14 +1385,28 @@ function playCascadeStep(result, idx){
     renderHUD();
     renderGoalBar();
 
+    // score popup: one per cleared tile, positioned at that tile, coloured by cascade depth
+    // goal pulse: for any goal-type tile that just got collected
+    const collectedGoalTypes = new Set();
     step.clearedCells.forEach(({r,c})=>{
       const el = tileEl(r,c);
-      if(el) el.classList.add('clearing');
+      if(el){
+        el.classList.add('clearing');
+        const rect = el.getBoundingClientRect();
+        const cx = rect.left + rect.width/2;
+        const cy = rect.top  + rect.height/2;
+        const pts = 10 * step.cascadeLevel;
+        spawnScorePopup(cx, cy, pts, step.cascadeLevel);
+      }
+      spawnParticlesAtTile(r,c);
     });
+    // determine which goal types were just collected this wave for the pulse
+    Object.keys(step.stepClearedCounts).forEach(type=> collectedGoalTypes.add(type));
+    pulseGoalItems(Array.from(collectedGoalTypes));
 
     setTimeout(()=>{
       game.grid = step.gridAfter.map(row=>row.map(cell=> cell ? {...cell} : null));
-      renderBoard();
+      renderBoard(step.newCells);
       setTimeout(()=> playCascadeStep(result, idx+1), 80);
     }, 220);
   }, 260);
